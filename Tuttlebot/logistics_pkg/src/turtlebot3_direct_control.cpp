@@ -1,3 +1,4 @@
+// turtlebot3_direct_control.cpp
 #include <rclcpp/rclcpp.hpp>
 #include <std_msgs/msg/int32.hpp>
 #include <geometry_msgs/msg/twist.hpp>
@@ -14,8 +15,8 @@ public:
     LogisticsController() 
         : Node("turtlebot3_control"), current_wp_index_(0),
           current_x_(0.0), current_y_(0.0), current_yaw_(0.0),
-          is_parking_(false),
-          current_state_(State::IDLE) {
+          current_state_(State::IDLE),
+          is_aligning_(false) { 
         
         initWaypoints();
 
@@ -28,21 +29,19 @@ public:
 
         status_pub_ = this->create_publisher<std_msgs::msg::Int32>("/turtle_sub", 10);
         cmd_vel_pub_ = this->create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);
-        
         initial_pose_pub_ = this->create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>("/initialpose", 10);
 
         control_timer_ = this->create_wall_timer(
             std::chrono::milliseconds(100), std::bind(&LogisticsController::controlLoop, this)
         );
 
-        RCLCPP_INFO(this->get_logger(), "Logistics Controller (새로운 좌표 & 10초 대기 버전) 시작됨.");
+        RCLCPP_INFO(this->get_logger(), "Logistics Controller (실측 좌표 적용 & 방향 제어 버전) 시작됨.");
 
-        // 🌟 Nav2와 AMCL이 완전히 켜질 때까지 10초 기다렸다가 초기 위치를 쏩니다!
-        init_timer_ = this->create_wall_timer(std::chrono::seconds(10), [this]() {
+        init_timer_ = this->create_wall_timer(std::chrono::seconds(2), [this]() {
             setInitialPose(); 
-            RCLCPP_INFO(this->get_logger(), "✅ 초기 상태(1: 적재소 대기)를 서버에 보고합니다.");
-            sendStatus(1);
-            init_timer_->cancel(); 
+            //RCLCPP_INFO(this->get_logger(), "✅ 초기 상태(1: 적재소 대기)를 서버에 보고합니다.");
+            //sendStatus(1);
+            init_timer_->cancel();
         });
     }
 
@@ -54,88 +53,92 @@ private:
     rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr cmd_sub_;
     rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr status_pub_;
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
-    rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr initial_pose_pub_;
-    
-    rclcpp::TimerBase::SharedPtr init_timer_;
-    rclcpp::TimerBase::SharedPtr control_timer_;
+    rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr initial_pose_pub_; 
+    rclcpp::TimerBase::SharedPtr init_timer_, control_timer_;
 
-    Waypoint wp_load_, wp_rail_, wp1_, wp2_, wp3_;
+    Waypoint wp_load_, wp_rail_; 
     std::vector<Waypoint> active_path_; 
-    size_t current_wp_index_;        
-
+    size_t current_wp_index_;
     double current_x_, current_y_, current_yaw_;
-    bool is_parking_; 
 
-    enum class State { IDLE, TO_RAIL, TO_LOAD };
+    enum class State { IDLE, TO_RAIL, TO_LOAD_0, TO_LOAD_1};
     State current_state_;
+    bool is_aligning_; 
 
     void initWaypoints() {
-        // 🌟 사용자 매핑 데이터 기반 갱신 완료!
-
-        // [첫 번째 사진] 적재소(시작점) 좌표 갱신
-        wp_load_ = {0.032, 0.037, 0.002}; 
+        // ✅ [수정됨] 첫 번째 사진(적재소) 실측 데이터 적용
+        // Translation: [0.094, -0.032], Yaw: 0.049 rad
+        wp_load_ = {-0.046, 0.020, 0.00642}; 
         
-        // [두 번째 사진] 레일 좌표 갱신
-        wp_rail_ = {0.882, -0.296, -0.008}; 
-
-        // 다른 경유지들은 기존 값 유지
-        wp1_     = {0.436, 0.713, -1.549};
-        wp2_     = {0.464, 0.154, -1.532};
-        wp3_     = {0.398, -0.008, -3.022};
+        // ✅ [수정됨] 두 번째 사진(레일) 실측 데이터 적용
+        // Translation: [0.960, -0.366], Yaw: 0.157 rad
+        wp_rail_ = {1.030, -0.366, 0.157}; 
     }
 
     void setInitialPose() {
         auto msg = geometry_msgs::msg::PoseWithCovarianceStamped();
-        msg.header.stamp = this->now();
         msg.header.frame_id = "map";
+        msg.header.stamp = this->now();
 
-        msg.pose.pose.position.x = wp_load_.x;
-        msg.pose.pose.position.y = wp_load_.y;
-        msg.pose.pose.position.z = 0.010;
+        // ✅ [수정됨] 적재소 실측 위치 세팅
+        msg.pose.pose.position.x = wp_load_.x; 
+        msg.pose.pose.position.y = wp_load_.y; 
+        msg.pose.pose.position.z = 0.000; 
 
         tf2::Quaternion q;
-        q.setRPY(0.0, 0.0, wp_load_.yaw);
-        msg.pose.pose.orientation.x = q.x();
-        msg.pose.pose.orientation.y = q.y();
-        msg.pose.pose.orientation.z = q.z();
-        msg.pose.pose.orientation.w = q.w();
+        q.setRPY(0, 0, wp_load_.yaw); // wp_load_.yaw = 0.049
 
-        msg.pose.covariance[0] = 0.25;
-        msg.pose.covariance[7] = 0.25;
-        msg.pose.covariance[35] = 0.068;
+        msg.pose.pose.orientation.x = 0.0;
+        msg.pose.pose.orientation.y = 0.0;
+        msg.pose.pose.orientation.z = -0.003;
+        msg.pose.pose.orientation.w = 0.999;
+
+        msg.pose.covariance[0] = 0.1;
+        msg.pose.covariance[7] = 0.1;
+        msg.pose.covariance[35] = 0.05;
 
         initial_pose_pub_->publish(msg);
-        RCLCPP_INFO(this->get_logger(), "📍 로봇의 초기 위치를 적재소(x:%.3f, y:%.3f)로 설정했습니다.", wp_load_.x, wp_load_.y);
+        RCLCPP_INFO(this->get_logger(), "초기 위치 설정 완료: x=%.3f, y=%.3f, yaw=%.3f", 
+                    wp_load_.x, wp_load_.y, wp_load_.yaw);
     }
 
     void commandCallback(const std_msgs::msg::Int32::SharedPtr msg) {
-        if (msg->data == 1 && current_state_ == State::IDLE) {
-            RCLCPP_INFO(this->get_logger(), "명령 1 수신: 적재소로 이동");
-            current_state_ = State::TO_LOAD;
-            active_path_ = {wp_load_};
+    
+        if (msg->data == 0 && current_state_ == State::IDLE) {
+            RCLCPP_INFO(this->get_logger(), "명령 0 수신: 적재소로 이동 시작");
+            current_state_ = State::TO_LOAD_0;
+            active_path_ = {wp_load_}; 
             current_wp_index_ = 0;
-            is_parking_ = false; 
+            is_aligning_ = false;
+            
+        }
+        else if (msg->data == 1 && current_state_ == State::IDLE) {
+            RCLCPP_INFO(this->get_logger(), "명령 1 수신: 적재소로 이동 시작");
+            current_state_ = State::TO_LOAD_1;
+            active_path_ = {wp_load_}; 
+            current_wp_index_ = 0;
+            is_aligning_ = false;
         } 
         else if (msg->data == 2 && current_state_ == State::IDLE) {
             RCLCPP_INFO(this->get_logger(), "명령 2 수신: 레일로 직행");
             current_state_ = State::TO_RAIL;
             active_path_ = {wp_rail_};
             current_wp_index_ = 0;
-            is_parking_ = false; 
+            is_aligning_ = false;
         }
     }
 
-    void sendStatus(int status_code) {
-        auto msg = std_msgs::msg::Int32();
-        msg.data = status_code;
-        status_pub_->publish(msg);
+    void sendStatus(int status_code) { 
+        auto msg = std_msgs::msg::Int32(); 
+        msg.data = status_code; 
+        status_pub_->publish(msg); 
     }
-
-    void stopRobot() {
-        auto twist = geometry_msgs::msg::Twist();
-        twist.linear.x = 0.0;
-        twist.angular.z = 0.0;
-        cmd_vel_pub_->publish(twist);
+    
+    void stopRobot() { 
+        auto twist = geometry_msgs::msg::Twist(); 
+        twist.linear.x = 0.0; 
+        twist.angular.z = 0.0; 
+        cmd_vel_pub_->publish(twist); 
     }
 
     void controlLoop() {
@@ -143,101 +146,93 @@ private:
         try {
             transformStamped = tf_buffer_->lookupTransform("map", "base_footprint", tf2::TimePointZero);
         } catch (const tf2::TransformException & ex) {
-            if (current_state_ != State::IDLE) {
-                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, 
-                    "⚠️ 로봇 절대 위치 획득 실패. 지도를 확인하세요!");
-            }
+            if (current_state_ != State::IDLE) RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000, "로봇 위치를 찾을 수 없습니다.");
             return;
         }
 
         current_x_ = transformStamped.transform.translation.x;
         current_y_ = transformStamped.transform.translation.y;
-
-        tf2::Quaternion q(
-            transformStamped.transform.rotation.x,
-            transformStamped.transform.rotation.y,
-            transformStamped.transform.rotation.z,
-            transformStamped.transform.rotation.w);
-        tf2::Matrix3x3 m(q);
-        double roll, pitch, yaw;
-        m.getRPY(roll, pitch, yaw);
+        tf2::Quaternion q(transformStamped.transform.rotation.x, transformStamped.transform.rotation.y, transformStamped.transform.rotation.z, transformStamped.transform.rotation.w);
+        tf2::Matrix3x3 m(q); double roll, pitch, yaw; m.getRPY(roll, pitch, yaw);
         current_yaw_ = yaw;
 
         if (current_state_ == State::IDLE || active_path_.empty()) return;
 
-        Waypoint target = active_path_[current_wp_index_];
+        Waypoint target = active_path_[current_wp_index_]; 
         double dx = target.x - current_x_;
         double dy = target.y - current_y_;
         double distance = std::sqrt(dx * dx + dy * dy);
-        double target_yaw = std::atan2(dy, dx);
-
-        double diff_yaw = target_yaw - current_yaw_;
-        while (diff_yaw > M_PI) diff_yaw -= 2.0 * M_PI;
-        while (diff_yaw < -M_PI) diff_yaw += 2.0 * M_PI;
 
         auto twist = geometry_msgs::msg::Twist();
-        bool is_final_destination = (current_wp_index_ == active_path_.size() - 1);
 
-        if (is_final_destination) {
-            if (!is_parking_ && distance <= 0.02) { 
-                is_parking_ = true;
-                RCLCPP_INFO(this->get_logger(), "목표 2cm 이내 진입! 제자리 회전을 시작합니다.");
-            } else if (is_parking_ && distance > 0.05) { 
-                is_parking_ = false;
-                RCLCPP_INFO(this->get_logger(), "회전 중 목표에서 멀어졌습니다. 다시 다가갑니다.");
-            }
-        } else {
-            if (distance < 0.05) {
-                stopRobot();
-                current_wp_index_++; 
-                RCLCPP_INFO(this->get_logger(), "경유지 통과! 다음으로 이동 중...");
-                return;
-            }
+        // [1단계: 위치 도착 판정]
+        if (distance < 0.08 && !is_aligning_) { 
+            RCLCPP_INFO(this->get_logger(), "최종 방향 정렬을 시작합니다.");
+            stopRobot(); 
+            is_aligning_ = true; 
+            return;
         }
 
-        if (is_parking_) {
-            double final_diff_yaw = target.yaw - current_yaw_;
-            while (final_diff_yaw > M_PI) final_diff_yaw -= 2.0 * M_PI;
-            while (final_diff_yaw < -M_PI) final_diff_yaw += 2.0 * M_PI;
+        if (is_aligning_) {
+            // [2단계: 최종 방향 정렬]
+            double yaw_error = target.yaw - current_yaw_;
+            while (yaw_error > M_PI) yaw_error -= 2.0 * M_PI;
+            while (yaw_error < -M_PI) yaw_error += 2.0 * M_PI;
 
-            if (std::abs(final_diff_yaw) > 0.08) {
-                twist.linear.x = 0.0; 
-                twist.angular.z = (final_diff_yaw > 0) ? 0.25 : -0.25; 
-                cmd_vel_pub_->publish(twist);
-                return;
-            } else {
+            // 오차 약 3도 이내면 정렬 완료
+            if (std::abs(yaw_error) < 0.05) { 
                 stopRobot();
-                is_parking_ = false; 
+                is_aligning_ = false;
+                current_wp_index_++;
 
-                if (current_state_ == State::TO_LOAD) {
-                    current_state_ = State::IDLE;
-                    RCLCPP_INFO(this->get_logger(), "✅ 적재소 정밀 주차 완료 (서버에 1 전송)");
-                    sendStatus(1);
-                } else if (current_state_ == State::TO_RAIL) {
-                    current_state_ = State::IDLE;
-                    RCLCPP_INFO(this->get_logger(), "✅ 레일 정밀 주차 완료 (서버에 2 전송)");
-                    sendStatus(2);
+                if (current_wp_index_ >= active_path_.size()) {
+                    
+                    if (current_state_ == State::TO_LOAD_0) {
+                        current_state_ = State::IDLE;
+                        RCLCPP_INFO(this->get_logger(), "적재소 안착 및 정렬 완료! (서버에 0 전송)");
+                        sendStatus(0);
+                    } else if (current_state_ == State::TO_LOAD_1) {
+                        current_state_ = State::IDLE;
+                        RCLCPP_INFO(this->get_logger(), "적재소 안착 및 정렬 완료! (서버에 1 전송)");
+                        sendStatus(1);
+                    } else if (current_state_ == State::TO_RAIL) {
+                        current_state_ = State::IDLE;
+                        RCLCPP_INFO(this->get_logger(), "레일 안착 및 정렬 완료! (서버에 2 전송)");
+                        sendStatus(2);
+                    }
                 }
                 return;
             }
-        }
 
-        if (std::abs(diff_yaw) > 0.15) { 
             twist.linear.x = 0.0; 
-            twist.angular.z = (diff_yaw > 0) ? 0.35 : -0.35; 
+            double angular_speed = std::max(0.15, std::min(std::abs(yaw_error) * 1.0, 0.4));
+            twist.angular.z = (yaw_error > 0) ? angular_speed : -angular_speed;
+
         } else {
-            double speed = distance * 1.5; 
-            twist.linear.x = std::min(speed, 0.15); 
-            twist.angular.z = diff_yaw * 1.5;       
+            // [주행 중]
+            double target_yaw = std::atan2(dy, dx);
+            double diff_yaw = target_yaw - current_yaw_;
+            while (diff_yaw > M_PI) diff_yaw -= 2.0 * M_PI;
+            while (diff_yaw < -M_PI) diff_yaw += 2.0 * M_PI;
+
+            if (std::abs(diff_yaw) > 0.15) { 
+                twist.linear.x = 0.0;
+                double angular_speed = std::max(0.2, std::min(std::abs(diff_yaw) * 0.8, 0.5));
+                twist.angular.z = (diff_yaw > 0) ? angular_speed : -angular_speed;
+            } else {
+                double linear_speed = distance * 0.8; 
+                twist.linear.x = std::max(0.07, std::min(linear_speed, 0.15)); 
+                twist.angular.z = diff_yaw * 0.8; 
+            }
         }
 
         cmd_vel_pub_->publish(twist);
     }
 };
 
-int main(int argc, char **argv) {
-    rclcpp::init(argc, argv);
-    rclcpp::spin(std::make_shared<LogisticsController>());
-    rclcpp::shutdown();
-    return 0;
+int main(int argc, char **argv) { 
+    rclcpp::init(argc, argv); 
+    rclcpp::spin(std::make_shared<LogisticsController>()); 
+    rclcpp::shutdown(); 
+    return 0; 
 }

@@ -48,32 +48,52 @@ void TurtleTCP::send_callback(const std_msgs::msg::Int32::SharedPtr msg) {
 }
 
 void TurtleTCP::run_server() {
-        try {
-            // 대기합니다.
-            acceptor_.accept(socket_); 
-            RCLCPP_INFO(this->get_logger(), "Manager Connected!");
+    try {
+        acceptor_.accept(socket_); 
+        RCLCPP_INFO(this->get_logger(), "Manager Connected!");
 
-            // 연결된 후에는 데이터를 계속 받습니다.
-            while (rclcpp::ok()) {
-                char data[1024] = {0};
-                boost::system::error_code error;
+        while (rclcpp::ok()) {
+            char data[1024] = {0}; // 루프마다 초기화
+            boost::system::error_code error;
+            
+            // 1. 실제로 받은 길이를 확인합니다 (중요!)
+            size_t len = socket_.read_some(buffer(data), error);
+            if (len > 0) {
+                // 1024바이트 중 딱 받은 만큼만 null 문자로 닫아줍니다.
+                data[len] = '\0'; 
                 
-                size_t len = socket_.read_some(buffer(data), error); 
+                // 실제로 뭐라고 들어오는지 정확히 확인!
+                RCLCPP_INFO(this->get_logger(), "Raw TCP data: [%s] (length: %ld)", data, len);
 
-                if (error == error::eof) {
-                    RCLCPP_WARN(this->get_logger(), "Manager Disconnected.");
-                    break; 
-                }
-
-                // 받은 명령(숫자)을 ROS 토픽으로 발행
                 auto msg = std_msgs::msg::Int32();
                 msg.data = std::atoi(data);
                 publisher_->publish(msg);
-                RCLCPP_INFO(this->get_logger(), "Received Command: %d", msg.data);
             }
-        } catch (std::exception& e) {
-            RCLCPP_ERROR(this->get_logger(), "Server Error: %s", e.what());
+
+            if (error == error::eof) {
+                RCLCPP_WARN(this->get_logger(), "Manager Disconnected.");
+                break; 
+            }
+
+            if (len > 0) {
+                // 2. 받은 길이만큼만 잘라서 문자열로 만듭니다.
+                std::string received_data(data, len);
+                
+                try {
+                    auto msg = std_msgs::msg::Int32();
+                    // 3. stoi를 써서 안전하게 변환 (숫자가 아닐 경우 예외처리 가능)
+                    msg.data = std::stoi(received_data);
+                    
+                    publisher_->publish(msg);
+                    RCLCPP_INFO(this->get_logger(), "Received Command: %d", msg.data);
+                } catch (const std::exception& e) {
+                    RCLCPP_WARN(this->get_logger(), "Invalid data received: %s", received_data.c_str());
+                }
+            }
         }
+    } catch (std::exception& e) {
+        RCLCPP_ERROR(this->get_logger(), "Server Error: %s", e.what());
+    }
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////
